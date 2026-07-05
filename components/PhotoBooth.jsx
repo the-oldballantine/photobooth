@@ -53,16 +53,17 @@ async function getRoom(code) {
   return data.room || null;
 }
 
-async function setRoom(code, room) {
+async function roomAction(code, action, payload = {}) {
   const res = await fetch("/api/room", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code, room }),
+    body: JSON.stringify({ code, action, ...payload }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) {
-    throw new Error(data.error || `setRoom failed (${res.status})`);
+    throw new Error(data.error || `${action} failed (${res.status})`);
   }
+  return data.room || null;
 }
 
 async function archiveRoom(code, room) {
@@ -339,10 +340,10 @@ export default function App() {
     const code = makeRoomCode();
     const r = emptyRoom();
     try {
-      await setRoom(code, r);
+      const fresh = await roomAction(code, "create", { room: r });
       setRoomCode(code);
       setRole("host");
-      setRoomState(r);
+      setRoomState(fresh || r);
       setScreen("lobby");
       startCamera();
     } catch (e) {
@@ -357,17 +358,16 @@ export default function App() {
     if (!code) return;
     setBusy(true);
     try {
-      const r = await getRoom(code);
-      if (!r) {
+      const existing = await getRoom(code);
+      if (!existing) {
         setErrorMsg("No room found with that code.");
         setBusy(false);
         return;
       }
-      r.partnerJoined = true;
-      await setRoom(code, r);
+      const fresh = await roomAction(code, "join");
       setRoomCode(code);
       setRole("partner");
-      setRoomState(r);
+      setRoomState(fresh || existing);
       setScreen("lobby");
       startCamera();
     } catch (e) {
@@ -395,13 +395,18 @@ export default function App() {
 
   const beginCountdown = useCallback(async () => {
     if (!room || !roomCode) return;
-    const latest = (await getRoom(roomCode)) || room;
-    if (latest.status === "countdown" || latest.status === "shooting") return;
-    latest.status = "countdown";
-    latest.countdownStart = Date.now() + COUNTDOWN_MS;
-    await setRoom(roomCode, latest);
-    setRoomState(latest);
-    setScreen("session");
+    if (room.status === "countdown" || room.status === "shooting") return;
+    try {
+      const fresh = await roomAction(roomCode, "advance", {
+        status: "countdown",
+        currentShot: room.currentShot,
+        countdownStart: Date.now() + COUNTDOWN_MS,
+      });
+      if (fresh) setRoomState(fresh);
+      setScreen("session");
+    } catch (e) {
+      setErrorMsg(`Could not start: ${e.message}`);
+    }
   }, [room, roomCode]);
 
   useEffect(() => {
@@ -424,7 +429,7 @@ export default function App() {
             setPreviewUrl(dataUrl);
             setTimeout(() => setPreviewUrl(null), 1900);
           }
-          submitShot(dataUrl);
+          submitShot(dataUrl, room.currentShot);
         }
         return;
       }
@@ -439,18 +444,14 @@ export default function App() {
   }, [room, captureFrame]);
 
   const submitShot = useCallback(
-    async (dataUrl) => {
+    async (dataUrl, shotIndex) => {
       if (!roomCode || !role) return;
       try {
-        const latest = (await getRoom(roomCode)) || room;
-        if (!latest) return;
-        latest.status = "shooting";
-        latest.shots[latest.currentShot][role] = dataUrl || latest.shots[latest.currentShot][role];
-        await setRoom(roomCode, latest);
-        setRoomState(latest);
+        const fresh = await roomAction(roomCode, "shot", { shotIndex, role, dataUrl });
+        if (fresh) setRoomState(fresh);
       } catch (e) {}
     },
-    [roomCode, role, room]
+    [roomCode, role]
   );
 
   useEffect(() => {
@@ -467,19 +468,23 @@ export default function App() {
             return;
           }
           if (latest.currentShot + 1 >= TOTAL_SHOTS) {
-            latest.status = "complete";
-            await setRoom(roomCode, latest);
-            setRoomState(latest);
+            const fresh = await roomAction(roomCode, "advance", {
+              status: "complete",
+              currentShot: latest.currentShot,
+              countdownStart: null,
+            });
+            if (fresh) setRoomState(fresh);
             if (!archivedRef.current) {
               archivedRef.current = true;
-              archiveRoom(roomCode, latest);
+              archiveRoom(roomCode, fresh || latest);
             }
           } else {
-            latest.currentShot += 1;
-            latest.status = "countdown";
-            latest.countdownStart = Date.now() + COUNTDOWN_MS;
-            await setRoom(roomCode, latest);
-            setRoomState(latest);
+            const fresh = await roomAction(roomCode, "advance", {
+              status: "countdown",
+              currentShot: latest.currentShot + 1,
+              countdownStart: Date.now() + COUNTDOWN_MS,
+            });
+            if (fresh) setRoomState(fresh);
           }
         } catch (e) {}
         advancingRef.current = false;
