@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { Camera, Users, Sparkles, Download, RotateCcw, Clock, Check, ArrowRight } from "lucide-react";
+import { Camera, Users, Sparkles, Download, RotateCcw, Clock, Check, ArrowRight, Music, VolumeX } from "lucide-react";
 
 const TOTAL_SHOTS = 4;
 const POLL_MS = 1200;
@@ -273,6 +273,8 @@ export default function App() {
 
   const [camReady, setCamReady] = useState(false);
   const [webrtcConnected, setWebrtcConnected] = useState(false);
+  const [musicOn, setMusicOn] = useState(false);
+  const [musicReady, setMusicReady] = useState(false);
 
   const bothJoined = room && room.hostJoined && room.partnerJoined;
 
@@ -290,6 +292,13 @@ export default function App() {
   const capturedForShotRef = useRef(-1);
   const advancingRef = useRef(false);
   const archivedRef = useRef(false);
+  const ytPlayerRef = useRef(null);
+  const ytReadyRef = useRef(false);
+  const ytPlaylistRef = useRef([]);
+  const ytHistoryRef = useRef([]);
+  const ytPendingSeekRef = useRef(false);
+  const ytSwitchTimerRef = useRef(null);
+  const musicOnRef = useRef(false);
 
   useEffect(() => {
     canvasRef.current = document.createElement("canvas");
@@ -337,6 +346,137 @@ export default function App() {
       } catch (e) {}
     }
   }, []);
+
+  const YT_PLAYLIST_ID = "PL3-sRm8xAzY8LhlTyJ2uf-EcQSm_vzSqw";
+  const MUSIC_SEGMENT_MIN_MS = 40000;
+  const MUSIC_SEGMENT_MAX_MS = 45000;
+
+  const scheduleNextTrackSwitch = useCallback(() => {
+    if (ytSwitchTimerRef.current) clearTimeout(ytSwitchTimerRef.current);
+    const wait = MUSIC_SEGMENT_MIN_MS + Math.random() * (MUSIC_SEGMENT_MAX_MS - MUSIC_SEGMENT_MIN_MS);
+    ytSwitchTimerRef.current = setTimeout(() => {
+      if (musicOnRef.current) playRandomTrack();
+    }, wait);
+  }, []);
+
+  const playRandomTrack = useCallback(() => {
+    const list = ytPlaylistRef.current;
+    const player = ytPlayerRef.current;
+    if (!player || !list || list.length === 0) return;
+    let idx;
+    const last = ytHistoryRef.current[ytHistoryRef.current.length - 1];
+    do {
+      idx = Math.floor(Math.random() * list.length);
+    } while (list.length > 1 && idx === last);
+    ytHistoryRef.current.push(idx);
+    ytPendingSeekRef.current = true;
+    try {
+      player.playVideoAt(idx);
+    } catch (e) {}
+  }, []);
+
+  const onYtStateChange = useCallback(
+    (e) => {
+      const YT = window.YT;
+      if (!YT) return;
+      if (e.data === YT.PlayerState.PLAYING) {
+        if (ytPendingSeekRef.current) {
+          ytPendingSeekRef.current = false;
+          try {
+            const dur = e.target.getDuration();
+            // Jump into a random point in the song, leaving enough runway
+            // for a full 40-45s segment before it ends.
+            if (dur && dur > 55) {
+              const latestStart = Math.max(5, dur - 50);
+              const startAt = 5 + Math.random() * (latestStart - 5);
+              e.target.seekTo(startAt, true);
+            }
+          } catch (err) {}
+          scheduleNextTrackSwitch();
+        }
+      } else if (e.data === YT.PlayerState.ENDED) {
+        if (musicOnRef.current) playRandomTrack();
+      }
+    },
+    [scheduleNextTrackSwitch, playRandomTrack]
+  );
+
+  const onYtReady = useCallback((e) => {
+    ytReadyRef.current = true;
+    try {
+      const list = e.target.getPlaylist() || [];
+      ytPlaylistRef.current = list;
+      e.target.setVolume(45);
+    } catch (err) {}
+    setMusicReady(true);
+  }, []);
+
+  useEffect(() => {
+    const initPlayer = () => {
+      if (ytPlayerRef.current) return;
+      ytPlayerRef.current = new window.YT.Player("yt-bg-music-player", {
+        height: "1",
+        width: "1",
+        playerVars: {
+          listType: "playlist",
+          list: YT_PLAYLIST_ID,
+          autoplay: 0,
+          controls: 0,
+          disablekb: 1,
+          modestbranding: 1,
+          playsinline: 1,
+        },
+        events: {
+          onReady: onYtReady,
+          onStateChange: onYtStateChange,
+        },
+      });
+    };
+
+    if (window.YT && window.YT.Player) {
+      initPlayer();
+    } else {
+      const prevCallback = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => {
+        if (typeof prevCallback === "function") prevCallback();
+        initPlayer();
+      };
+      if (!document.getElementById("yt-iframe-api-script")) {
+        const tag = document.createElement("script");
+        tag.id = "yt-iframe-api-script";
+        tag.src = "https://www.youtube.com/iframe_api";
+        document.body.appendChild(tag);
+      }
+    }
+
+    return () => {
+      if (ytSwitchTimerRef.current) clearTimeout(ytSwitchTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggleMusic = useCallback(() => {
+    const player = ytPlayerRef.current;
+    if (!player || !ytReadyRef.current) return;
+    if (musicOnRef.current) {
+      musicOnRef.current = false;
+      setMusicOn(false);
+      if (ytSwitchTimerRef.current) clearTimeout(ytSwitchTimerRef.current);
+      try {
+        player.pauseVideo();
+      } catch (e) {}
+    } else {
+      musicOnRef.current = true;
+      setMusicOn(true);
+      if (ytHistoryRef.current.length === 0) {
+        playRandomTrack();
+      } else {
+        try {
+          player.playVideo();
+        } catch (e) {}
+      }
+    }
+  }, [playRandomTrack]);
 
   const ICE_SERVERS = [
     { urls: "stun:stun.l.google.com:19302" },
@@ -425,7 +565,7 @@ export default function App() {
     }
   }, [screen, webrtcConnected]);
 
-  const captureFrame = useCallback(() => {
+  const captureFrame = useCallback((styled = false) => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas || video.videoWidth === 0) return null;
@@ -455,6 +595,14 @@ export default function App() {
     ctx.scale(-1, 1);
     ctx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
     ctx.restore();
+
+    // Live preview frames (uploaded ~once/sec) skip all the styling below —
+    // normal color, no per-pixel processing, so there's no lag while the
+    // camera is just live. The black & white film look only gets baked in
+    // for the actual captured shot, when styled === true.
+    if (!styled) {
+      return canvas.toDataURL("image/jpeg", 0.55);
+    }
 
     // Manual pixel-level grayscale + contrast (doesn't rely on ctx.filter,
     // which some mobile browsers don't support on canvas).
@@ -582,7 +730,7 @@ export default function App() {
     if (!roomCode || !role) return;
     if (screen !== "lobby" && screen !== "session") return;
     const uploadFrame = async () => {
-      const dataUrl = captureFrame();
+      const dataUrl = captureFrame(false);
       if (!dataUrl) return;
       try {
         await roomAction(roomCode, "live", { role, dataUrl });
@@ -624,7 +772,7 @@ export default function App() {
           capturedForShotRef.current = room.currentShot;
           setFlash(true);
           setTimeout(() => setFlash(false), 260);
-          const dataUrl = captureFrame();
+          const dataUrl = captureFrame(true);
           if (dataUrl) {
             setPreviewUrl(dataUrl);
             setTimeout(() => setPreviewUrl(null), 1900);
@@ -819,6 +967,17 @@ export default function App() {
         }
       `}</style>
 
+      <div id="yt-bg-music-player" style={{ position: "fixed", width: 1, height: 1, opacity: 0, pointerEvents: "none", overflow: "hidden" }} />
+
+      <button
+        onClick={toggleMusic}
+        disabled={!musicReady}
+        title={musicOn ? "Pause background music" : "Play background music"}
+        style={styles.musicToggle}
+      >
+        {musicOn ? <Music size={18} /> : <VolumeX size={18} />}
+      </button>
+
       <Petals count={9} />
 
       {screen === "landing" && (
@@ -1003,6 +1162,24 @@ const styles = {
   },
   petalAmbientLayer: { position: "fixed", inset: 0, zIndex: 0, overflow: "hidden", pointerEvents: "none" },
   petalBurstLayer: { position: "fixed", inset: 0, zIndex: 40, overflow: "hidden", pointerEvents: "none" },
+  musicToggle: {
+    position: "fixed",
+    bottom: 18,
+    right: 18,
+    zIndex: 60,
+    width: 44,
+    height: 44,
+    borderRadius: "50%",
+    border: "none",
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: COLORS.white,
+    color: COLORS.blossomDeep,
+    boxShadow: `0 8px 20px -6px ${COLORS.bark}44`,
+    transition: "transform .18s ease, box-shadow .2s ease",
+  },
   eyebrow: {
     fontFamily: "'Space Mono', monospace",
     fontSize: 11,
